@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+
+# --- COLORS ---
+CF_RED=$(echo -e "\033[38;2;255;54;7m")  # rgb(255,54,7)
+CF_CYA=$(echo -e "\033[38;2;0;181;255m") # rgb(0,181,255)
+C_RES=$(echo -e "\033[0m")
+
+# --- ARGS ---
+OPTIND=1
+
+declare effect_file=""
+declare effect=""
+declare verbose=false
+
+while getopts "f:e:hv" opt; do
+  case "$opt" in
+  f)
+    effect_file=$OPTARG
+    ;;
+  e)
+    effect=$OPTARG
+    ;;
+  h)
+    echo '
+This tool takes any active recordings and runs them through SoX, enabling live voice modulatiion.
+
+Requirements:
+* SoX (http://sox.sourceforge.net/)
+* PulseAudio Controller/pactl (https://linux.die.net/man/1/pactl)
+
+Commands:
+-h Print this text
+-v Verbose SoX output
+-e Enable a pre-defined effect (robot, dalek, none [for testing purposes])
+-f Specify a file containing effects
+'
+
+    exit
+    ;;
+  v)
+    verbose=true
+    ;;
+  *) ;;
+  esac
+done
+
+shift $((OPTIND - 1))
+[ "${1:-}" = "--" ] && shift
+
+# --- SETUP ---
+
+error() {
+  echo "${CF_RED}$*${C_RES}" >&2
+  exit 1
+}
+
+if ! command -v sox &>/dev/null; then error "SoX (sox) is missing"; fi
+if ! command -v pactl &>/dev/null; then error "PulseAudio Controller (pactl) is missing"; fi
+if [ -z "$effect" ] && [ -z "$effect_file" ]; then error "Please provide an effect name or the path to an effect file"; fi
+allowed_effects=(robot dalek none)
+if [ -n "$effect" ] && ! [[ " ${allowed_effects[*]} " =~ ${effect+" $effect "} ]]; then error "Please pick a valid effect: robot, dalek, none"; fi
+if [ -n "$effect_file" ] && ! [ -f "$effect_file" ]; then error "The provided file does not exist"; fi
+
+declare sox_pid
+
+start_sox() {
+  if $verbose; then
+    echo "sox -t pulseaudio default -t pulseaudio null $* &"
+    sox -t pulseaudio default -t pulseaudio null "$@" &
+    sox_pid=$!
+  else
+    sox -t pulseaudio default -t pulseaudio null "$@" &>/dev/null &
+    sox_pid=$!
+  fi
+}
+
+cleanup() {
+  ! pgrep sox &>/dev/null || kill $sox_pid
+  ! pactl list sources short | grep module-null-sink &>/dev/null || pactl unload-module module-null-sink
+}
+trap cleanup 1 2 3 15
+
+liveness_check() {
+  if ! pgrep sox &>/dev/null; then cleanup && exit 1; fi
+}
+
+# --- THE MAGIC ---
+
+# setup the null sink SoX will pipe into
+if ! pactl list sources short | grep module-null-sink &>/dev/null; then
+  pactl load-module module-null-sink 1>/dev/null
+fi
+sink=$(pactl list sources short | grep module-null-sink | awk '{print $1}')
+
+# pick effects
+if [ "$effect" = "robot" ]; then
+  start_sox overdrive 25 25 echo 0.4 0.8 15 0.8 synth sine fmod 30 echo 0.8 0.8 29 0.8 pitch -500
+elif [ "$effect" = "dalek" ]; then
+  start_sox stretch 1.2 133.33 lin 0.2 0.4 overdrive 30 30 echo 0.4 0.8 15 0.8 synth sine fmod 30 echo 0.8 0.8 29 0.8
+elif [ "$effect" = "none" ]; then
+  start_sox pitch 0
+elif [ -n "$effect_file" ]; then
+  # shellcheck disable=SC2046
+  start_sox $(sed 's/#.*//' "$effect_file" | xargs)
+else
+  error 'No effects provided'
+fi
+
+# make sure SoX started successfully or exit if it didn't
+liveness_check
+
+# hook up any active recordings to the null sink
+pactl list source-outputs | grep -- 'Source Output #\|application.name =' | while read -r so; do
+  # the current line is either the source output number or the application name
+
+  # if source output number, set id and continue
+  if echo "$so" | grep 'Source Output #' &>/dev/null; then
+    id=$(echo "$so" | awk -F'#' '{print $2}')
+    continue
+  fi
+
+  # skip any SoX source outputs (such as the one we generated)
+  if echo "$so" | grep 'SoX' &>/dev/null; then
+    continue
+  fi
+
+  # skip any PulseAudio Volume Control source outputs
+  if echo "$so" | grep 'PulseAudio Volume Control' &>/dev/null; then
+    continue
+  fi
+
+  # hook up the source output to our SoX-fed null sink
+  pactl move-source-output "$id" "$sink"
+done
+# TODO: instead assemble a list of possible input?
+
+echo "${CF_CYA}Voice changer active; press CTRL+C to exit${C_RES}" >&2
+
+while true; do
+  # exit & clean up if SoX crashes/exits
+  liveness_check
+  sleep 1
+done
