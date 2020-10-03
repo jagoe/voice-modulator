@@ -5,7 +5,7 @@ Little script to automate the process of hooking up the SoX stream to any record
 ## Requirements
 
 * [SoX](http://sox.sourceforge.net/)
-* [PulseAudio Control/pactl(https://linux.die.net/man/1/pactl)
+* [PulseAudio Control/pactl](https://linux.die.net/man/1/pactl)
 
 ## Usage
 
