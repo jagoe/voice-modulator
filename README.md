@@ -1,6 +1,6 @@
 # Voice Modulator
 
-Little script to automate the process of hooking up the SoX stream to any recording software.
+Little script to automate the process of hooking up a SoX stream to any recording software.
 
 ## Requirements
 
